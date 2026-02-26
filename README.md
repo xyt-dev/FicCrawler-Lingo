@@ -11,8 +11,9 @@ A Rust CLI tool that scrapes [Archive of Our Own](https://archiveofourown.org) f
 - Extracts full metadata: rating, warnings, categories, fandoms, relationships, characters, tags, stats (kudos, bookmarks, hits, word count, etc.), summary, author notes
 - Generates **study HTML** with per-paragraph translation slots (translation, vocabulary, chunks)
 - Auto-generates an **LLM prompt template** (`prompt.txt`) for translation & vocabulary analysis
-- Retry with exponential backoff on timeout / 5xx / 429 errors
+- Retry with exponential backoff on timeout / 5xx / 429 errors, with live countdown display
 - Progress bar with real-time status
+- Cloudflare bypass via browser cookie file (`--cookies`)
 
 ## Installation
 
@@ -30,6 +31,9 @@ Binary will be at `target/release/ao3-scraper`.
 # Basic — scrapes to ./books/<WorkTitle>/
 ao3-scraper "https://archiveofourown.org/works/27526954/chapters/67317511"
 
+# With browser cookies (required if Cloudflare blocks you)
+ao3-scraper "https://archiveofourown.org/works/12345" --cookies ~/ao3_cookies.txt
+
 # Custom output directory
 ao3-scraper "https://archiveofourown.org/works/12345" -o my-reading
 
@@ -39,7 +43,19 @@ ao3-scraper <URL> [OPTIONS]
   -d, --delay <MS>        Delay between requests in ms (default: 1500)
   -r, --retries <N>       Max retry attempts per request (default: 5)
   -t, --timeout <SECS>    Request timeout in seconds (default: 60)
+      --cookies <FILE>    Netscape-format cookies.txt from browser (for Cloudflare bypass)
 ```
+
+### Cloudflare / 525 errors
+
+AO3 uses Cloudflare which may block automated requests with a 525 SSL error. To work around this, export your browser's cookies for `archiveofourown.org` and pass them with `--cookies`:
+
+1. In Firefox, install the [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/) extension
+2. Log in to AO3 in your browser
+3. Click the extension icon on an AO3 page → **Export** → save as `ao3_cookies.txt`
+4. Run: `ao3-scraper <URL> --cookies ~/ao3_cookies.txt`
+
+> Note: `__cf_bm` cookies expire after a few minutes. Re-export if you get 525 errors again.
 
 ## Output Structure
 
@@ -98,6 +114,7 @@ Each paragraph block in the HTML:
 ## Requirements
 
 - Rust 1.70+ (tested with 1.95-nightly)
+- `curl` (system curl, must be in PATH)
 - Internet access to archiveofourown.org
 
 ## License

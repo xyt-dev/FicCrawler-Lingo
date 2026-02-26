@@ -11,8 +11,9 @@
 - 提取完整元数据：分级、警告、分类、同人原作、配对关系、角色、标签、统计数据（点赞、收藏、阅读量、字数等）、摘要、作者笔记
 - 生成**学习用 HTML**，每段原文下方都有翻译填空位（翻译、生词解析、常用搭配）
 - 自动生成**大模型提示词模板**（`prompt.txt`），适用于翻译和词汇分析
-- 超时 / 5xx / 429 错误自动重试（指数退避）
+- 超时 / 5xx / 429 错误自动重试（指数退避），重试等待期间显示实时倒计时
 - 带进度条的实时状态显示
+- 通过浏览器 Cookie 文件（`--cookies`）绕过 Cloudflare 限制
 
 ## 安装
 
@@ -30,16 +31,31 @@ cargo build --release
 # 基本用法 — 爬取到 ./books/<作品名>/
 ao3-scraper "https://archiveofourown.org/works/27526954/chapters/67317511"
 
+# 使用浏览器 Cookie（Cloudflare 拦截时必须）
+ao3-scraper "https://archiveofourown.org/works/12345" --cookies ~/ao3_cookies.txt
+
 # 自定义输出目录
 ao3-scraper "https://archiveofourown.org/works/12345" -o my-reading
 
 # 所有选项
 ao3-scraper <URL> [选项]
-  -o, --output <目录>     输出目录（默认：books）
-  -d, --delay <毫秒>      请求间隔（默认：1500）
-  -r, --retries <次数>    每个请求最大重试次数（默认：5）
-  -t, --timeout <秒>      请求超时时间（默认：60）
+  -o, --output <目录>          输出目录（默认：books）
+  -d, --delay <毫秒>            请求间隔（默认：1500）
+  -r, --retries <次数>          每个请求最大重试次数（默认：5）
+  -t, --timeout <秒>            请求超时时间（默认：60）
+      --cookies <文件>          Netscape 格式的浏览器 cookies.txt（用于绕过 Cloudflare）
 ```
+
+### Cloudflare / 525 错误
+
+AO3 使用了 Cloudflare 保护，可能会以 525 SSL 错误拦截自动化请求。解决方法是导出浏览器的 AO3 Cookie 并通过 `--cookies` 传入：
+
+1. 在 Firefox 中安装 [cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/) 扩展
+2. 在浏览器中登录 AO3
+3. 在 AO3 页面上点击扩展图标 → **Export** → 保存为 `ao3_cookies.txt`
+4. 运行：`ao3-scraper <URL> --cookies ~/ao3_cookies.txt`
+
+> 注意：`__cf_bm` Cookie 几分钟后过期。若再次遇到 525 错误，请重新导出。
 
 ## 输出结构
 
@@ -97,6 +113,7 @@ HTML 中每个段落块的结构：
 ## 系统要求
 
 - Rust 1.70+（已在 1.95-nightly 上测试）
+- `curl`（系统 curl，需在 PATH 中）
 - 能访问 archiveofourown.org 的网络连接
 
 ## 许可证

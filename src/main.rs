@@ -2,11 +2,11 @@ use clap::Parser;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use reqwest::blocking::Client;
 use scraper::{ElementRef, Html, Selector};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -31,6 +31,10 @@ struct Args {
     /// Request timeout in seconds
     #[arg(short, long, default_value_t = 60)]
     timeout: u64,
+
+    /// Path to a Netscape-format cookies.txt file (export from browser extension)
+    #[arg(long)]
+    cookies: Option<String>,
 }
 
 #[derive(Debug)]
@@ -60,19 +64,12 @@ fn main() {
 
     let work_id = extract_work_id(&args.url).expect("Could not extract work ID from URL");
 
-    let client = Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0")
-        .cookie_store(true)
-        .timeout(Duration::from_secs(args.timeout))
-        .connect_timeout(Duration::from_secs(30))
-        .build()
-        .expect("Failed to build HTTP client");
-
     // -- Phase 1: Fetch navigate page to get chapter list & metadata --
     let phase1_pb = ProgressBar::new_spinner();
     phase1_pb.set_style(
         ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg}")
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+            .template("{spinner:.cyan.bold} {msg}")
             .unwrap(),
     );
     phase1_pb.set_message(format!(
@@ -85,7 +82,7 @@ fn main() {
         "https://archiveofourown.org/works/{}/navigate?view_adult=true",
         work_id
     );
-    let navigate_html = fetch_with_retry(&client, &navigate_url, args.retries, &phase1_pb);
+    let navigate_html = fetch_with_retry(&navigate_url, args.retries, args.timeout, args.cookies.as_deref(), &phase1_pb);
     let navigate_doc = Html::parse_document(&navigate_html);
     let chapter_links = extract_chapter_links(&navigate_doc);
 
@@ -95,7 +92,7 @@ fn main() {
     );
     thread::sleep(Duration::from_millis(args.delay));
     phase1_pb.set_message("Fetching metadata...");
-    let first_html = fetch_with_retry(&client, &first_url, args.retries, &phase1_pb);
+    let first_html = fetch_with_retry(&first_url, args.retries, args.timeout, args.cookies.as_deref(), &phase1_pb);
     let first_doc = Html::parse_document(&first_html);
 
     let meta = extract_metadata(&first_doc);
@@ -168,7 +165,7 @@ fn main() {
                 chapter_url
             );
             let chapter_html =
-                fetch_with_retry(&client, &full_chapter_url, args.retries, &pb);
+                fetch_with_retry(&full_chapter_url, args.retries, args.timeout, args.cookies.as_deref(), &pb);
 
             pb.set_message(format!("{}  (parsing)", filename));
             let chapter_doc = Html::parse_document(&chapter_html);
@@ -274,60 +271,100 @@ fn main() {
 fn chapter_progress_style() -> ProgressStyle {
     ProgressStyle::default_bar()
         .template(
-            "{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} {msg} ({elapsed_precise})",
+            " {spinner:.cyan} {msg:30!} [{bar:38.green/dim}] {pos}/{len}  {elapsed_precise} / ETA {eta}",
         )
         .unwrap()
-        .progress_chars("━╸─")
+        .progress_chars("█▉▊▋▌▍▎▏ ")
 }
 
-/// Fetch a URL with retry + exponential backoff.
-fn fetch_with_retry(client: &Client, url: &str, max_retries: u32, pb: &ProgressBar) -> String {
+fn fetch_with_retry(
+    url: &str,
+    max_retries: u32,
+    timeout_secs: u64,
+    cookies_file: Option<&str>,
+    pb: &ProgressBar,
+) -> String {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match client.get(url).send() {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    return resp.text().unwrap_or_default();
+
+        let mut cmd = Command::new("curl");
+        let timeout_str = timeout_secs.to_string();
+        cmd.args([
+            "--silent",
+            "--compressed",
+            "--location",
+            "--max-time", &timeout_str,
+            "--connect-timeout", "30",
+            "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0",
+            "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "-H", "Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.6,en;q=0.5",
+            "-H", "Accept-Encoding: gzip, deflate, br, zstd",
+            "-H", "Connection: keep-alive",
+            "-H", "Upgrade-Insecure-Requests: 1",
+            "-H", "Sec-Fetch-Dest: document",
+            "-H", "Sec-Fetch-Mode: navigate",
+            "-H", "Sec-Fetch-Site: none",
+            "-H", "Sec-Fetch-User: ?1",
+            "--write-out", "\n__STATUS__%{http_code}",
+            url,
+        ]);
+        if let Some(path) = cookies_file {
+            cmd.args(["--cookie", path]);
+        }
+
+        match cmd.output() {
+            Ok(out) => {
+                let raw = String::from_utf8_lossy(&out.stdout);
+                if let Some(pos) = raw.rfind("\n__STATUS__") {
+                    let body = &raw[..pos];
+                    let status: u16 = raw[pos + 11..].trim().parse().unwrap_or(0);
+
+                    if (200..300).contains(&status) {
+                        return body.to_string();
+                    }
+
+                    let is_rate_limit = status == 429;
+                    if (status >= 500 || is_rate_limit) && attempt <= max_retries {
+                        let wait = retry_delay(attempt, is_rate_limit);
+                        sleep_with_countdown(
+                            pb,
+                            wait,
+                            &format!("HTTP {} · retry {}/{}", status, attempt, max_retries),
+                        );
+                        continue;
+                    }
+                    eprintln!("HTTP error {}: {}", status, url);
+                    std::process::exit(1);
+                } else {
+                    // curl exit non-zero or no status marker → network error
+                    if attempt <= max_retries {
+                        let wait = retry_delay(attempt, false);
+                        sleep_with_countdown(
+                            pb,
+                            wait,
+                            &format!("curl error · retry {}/{}", attempt, max_retries),
+                        );
+                        continue;
+                    }
+                    eprintln!("curl failed after {} attempts: {}", max_retries, url);
+                    std::process::exit(1);
                 }
-                // Retry on 5xx or 429
-                if (status.is_server_error() || status.as_u16() == 429) && attempt <= max_retries {
-                    let wait = retry_delay(attempt, status.as_u16() == 429);
-                    pb.set_message(format!(
-                        "HTTP {} - retry {}/{} in {}s",
-                        status.as_u16(),
-                        attempt,
-                        max_retries,
-                        wait.as_secs()
-                    ));
-                    thread::sleep(wait);
-                    continue;
-                }
-                eprintln!("HTTP error {}: {}", status.as_u16(), url);
-                std::process::exit(1);
             }
             Err(e) => {
-                if attempt <= max_retries {
-                    let reason = if e.is_timeout() {
-                        "timeout"
-                    } else if e.is_connect() {
-                        "connect error"
-                    } else {
-                        "network error"
-                    };
-                    let wait = retry_delay(attempt, false);
-                    pb.set_message(format!(
-                        "{} - retry {}/{} in {}s",
-                        reason, attempt, max_retries, wait.as_secs()
-                    ));
-                    thread::sleep(wait);
-                    continue;
-                }
-                eprintln!("Request failed after {} attempts: {}", max_retries, e);
+                eprintln!("Failed to run curl: {}", e);
                 std::process::exit(1);
             }
         }
+    }
+}
+
+/// Sleep for `duration`, updating the progress bar every second with a countdown.
+fn sleep_with_countdown(pb: &ProgressBar, duration: Duration, reason: &str) {
+    let total_secs = duration.as_secs().max(1);
+    for remaining in (1..=total_secs).rev() {
+        pb.set_message(format!("{} ({}s)", reason, remaining));
+        thread::sleep(Duration::from_secs(1));
     }
 }
 
