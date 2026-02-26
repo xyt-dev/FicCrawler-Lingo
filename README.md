@@ -106,6 +106,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
 export ANTHROPIC_API_KEY=sk-ant-...
+# OR
+export ANTHROPIC_API_KEY=$ANTHROPIC_AUTH_TOKEN
 
 # Translate all chapters of a book
 .venv/bin/python translate.py "../books/A Ruinous Gift"
