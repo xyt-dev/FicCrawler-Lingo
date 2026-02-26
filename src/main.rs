@@ -137,11 +137,7 @@ fn main() {
         let content_md = extract_single_chapter_content(&first_doc);
         fs::write(out_dir.join("chapter1.md"), &content_md).expect("Failed to write chapter");
 
-        let content_el = first_doc
-            .select(&sel("div.userstuff[role='article']"))
-            .next()
-            .or_else(|| first_doc.select(&sel("div.userstuff")).next());
-        let study_html = generate_chapter_html("Chapter 1", content_el, None, None, 1);
+        let study_html = generate_chapter_html("Chapter 1", &content_md, "", "", 1);
         fs::write(out_dir.join("chapter1.html"), &study_html).expect("Failed to write html");
 
         pb.inc(1);
@@ -221,21 +217,6 @@ fn main() {
                 .expect("Failed to write chapter md");
 
             // -- HTML with translation slots --
-            let content_el = chapter_doc
-                .select(&sel("div.userstuff[role='article']"))
-                .next()
-                .or_else(|| {
-                    chapter_doc
-                        .select(&sel("div#chapters div.userstuff"))
-                        .next()
-                });
-            let notes_begin_el = chapter_doc
-                .select(&sel("div#chapters div.preface div.notes blockquote.userstuff"))
-                .next();
-            let notes_end_el = chapter_doc
-                .select(&sel("div#chapters div.end.notes blockquote"))
-                .next();
-
             let display_title = if title.is_empty() {
                 format!("Chapter {}", chapter_num)
             } else {
@@ -243,9 +224,9 @@ fn main() {
             };
             let study_html = generate_chapter_html(
                 &display_title,
-                content_el,
-                notes_begin_el,
-                notes_end_el,
+                &content,
+                &chapter_notes_begin,
+                &chapter_notes_end,
                 chapter_num,
             );
             fs::write(out_dir.join(format!("{}.html", filename)), &study_html)
@@ -918,98 +899,60 @@ fn process_table(table: ElementRef, out: &mut String) {
 }
 
 /// Generate a study HTML page for a chapter with translation slots under each paragraph.
+/// Content is derived from the already-generated markdown strings, so empty paragraphs are
+/// naturally excluded.
 fn generate_chapter_html(
     title: &str,
-    content_el: Option<ElementRef>,
-    notes_begin_el: Option<ElementRef>,
-    notes_end_el: Option<ElementRef>,
+    content: &str,
+    notes_begin: &str,
+    notes_end: &str,
     chapter_num: usize,
 ) -> String {
     let mut body = String::new();
 
     // Chapter notes (beginning)
-    if let Some(el) = notes_begin_el {
+    if !notes_begin.is_empty() {
         body.push_str("<div class=\"chapter-notes\">\n<p class=\"notes-label\">Chapter Notes</p>\n");
-        body.push_str(&html_node_inner(el));
+        body.push_str(&format!("<blockquote>{}</blockquote>", md_inline_to_html(notes_begin)));
         body.push_str("\n</div>\n<hr>\n");
     }
 
-    // Main content: walk children, wrap each <p> with a translation block
-    if let Some(el) = content_el {
-        let mut para_id = 0;
-        for child in el.children() {
-            match child.value() {
-                scraper::node::Node::Element(elem) => {
-                    if let Some(child_ref) = ElementRef::wrap(child) {
-                        let tag = elem.name();
-                        let class = elem.attr("class").unwrap_or("");
-                        // Skip landmark headings
-                        if (tag.starts_with('h') && tag.len() == 2)
-                            && (class.contains("landmark") || class.contains("heading"))
-                        {
-                            continue;
-                        }
-                        if tag == "span" && class.contains("landmark") {
-                            continue;
-                        }
-
-                        if tag == "p" {
-                            para_id += 1;
-                            let inner = html_node_inner(child_ref);
-                            body.push_str(&format!(
-                                "<div class=\"para-block\" id=\"p{pid}\">\n\
-                                 <p class=\"original\">{inner}</p>\n\
-                                 <div class=\"translation\">\n\
-                                 <p class=\"trans-text\"></p>\n\
-                                 <details class=\"vocab\"><summary>Vocabulary &amp; Chunks</summary>\n\
-                                 <div class=\"vocab-content\">\n\
-                                 <p class=\"vocab-item\"></p>\n\
-                                 <p class=\"chunks\"></p>\n\
-                                 </div>\n\
-                                 </details>\n\
-                                 </div>\n\
-                                 </div>\n\n",
-                                pid = para_id,
-                                inner = inner
-                            ));
-                        } else {
-                            // Non-paragraph elements (hr, h1-h6, blockquote, etc.)
-                            body.push_str(&outer_html(child_ref));
-                            body.push('\n');
-                        }
-                    }
-                }
-                scraper::node::Node::Text(text) => {
-                    let t = text.text.trim();
-                    if !t.is_empty() {
-                        para_id += 1;
-                        body.push_str(&format!(
-                            "<div class=\"para-block\" id=\"p{pid}\">\n\
-                             <p class=\"original\">{text}</p>\n\
-                             <div class=\"translation\">\n\
-                             <p class=\"trans-text\"></p>\n\
-                             <details class=\"vocab\"><summary>Vocabulary &amp; Chunks</summary>\n\
-                             <div class=\"vocab-content\">\n\
-                             <p class=\"vocab-item\"></p>\n\
-                             <p class=\"chunks\"></p>\n\
-                             </div>\n\
-                             </details>\n\
-                             </div>\n\
-                             </div>\n\n",
-                            pid = para_id,
-                            text = html_escape(t)
-                        ));
-                    }
-                }
-                _ => {}
-            }
+    // Main content: split md by double newline, generate para-block for each non-empty paragraph
+    let mut para_id = 0usize;
+    for block in content.split("\n\n") {
+        let trimmed = block.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (html, is_para) = md_block_to_html(trimmed);
+        if is_para {
+            para_id += 1;
+            body.push_str(&format!(
+                "<div class=\"para-block\" id=\"p{pid}\">\n\
+                 <p class=\"original\">{inner}</p>\n\
+                 <div class=\"translation\">\n\
+                 <p class=\"trans-text\"></p>\n\
+                 <details class=\"vocab\"><summary>Vocabulary &amp; Chunks</summary>\n\
+                 <div class=\"vocab-content\">\n\
+                 <p class=\"vocab-item\"></p>\n\
+                 <p class=\"chunks\"></p>\n\
+                 </div>\n\
+                 </details>\n\
+                 </div>\n\
+                 </div>\n\n",
+                pid = para_id,
+                inner = html
+            ));
+        } else {
+            body.push_str(&html);
+            body.push('\n');
         }
     }
 
     // Chapter notes (end)
-    if let Some(el) = notes_end_el {
+    if !notes_end.is_empty() {
         body.push_str("<hr>\n<div class=\"chapter-notes\">\n<p class=\"notes-label\">End Notes</p>\n");
-        body.push_str(&html_node_inner(el));
+        body.push_str(&format!("<blockquote>{}</blockquote>", md_inline_to_html(notes_end)));
         body.push_str("\n</div>\n");
     }
 
@@ -1061,21 +1004,216 @@ fn generate_chapter_html(
     )
 }
 
-/// Get the inner HTML of an element (its children serialized).
-fn html_node_inner(el: ElementRef) -> String {
-    el.inner_html()
-}
-
-/// Get the outer HTML of an element.
-fn outer_html(el: ElementRef) -> String {
-    el.html()
-}
-
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Convert markdown inline formatting back to HTML.
+/// Handles: **bold**, *italic*, ~~strikethrough~~, [text](url), and passthrough <u>/<sup>/<sub>.
+fn md_inline_to_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        // ~~strikethrough~~
+        if i + 1 < len && chars[i] == '~' && chars[i + 1] == '~' {
+            if let Some(end) = (i + 2..len - 1).find(|&j| chars[j] == '~' && chars[j + 1] == '~') {
+                let inner: String = chars[i + 2..end].iter().collect();
+                out.push_str("<s>");
+                out.push_str(&md_inline_to_html(&inner));
+                out.push_str("</s>");
+                i = end + 2;
+                continue;
+            }
+        }
+        // **bold**
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some(end) = (i + 2..len - 1).find(|&j| chars[j] == '*' && chars[j + 1] == '*') {
+                let inner: String = chars[i + 2..end].iter().collect();
+                out.push_str("<strong>");
+                out.push_str(&md_inline_to_html(&inner));
+                out.push_str("</strong>");
+                i = end + 2;
+                continue;
+            }
+        }
+        // *italic*
+        if chars[i] == '*' {
+            if let Some(end) = (i + 1..len).find(|&j| chars[j] == '*') {
+                let inner: String = chars[i + 1..end].iter().collect();
+                out.push_str("<em>");
+                out.push_str(&md_inline_to_html(&inner));
+                out.push_str("</em>");
+                i = end + 1;
+                continue;
+            }
+        }
+        // [text](url)
+        if chars[i] == '[' {
+            if let Some(bracket_end) = (i + 1..len).find(|&j| chars[j] == ']') {
+                if bracket_end + 1 < len && chars[bracket_end + 1] == '(' {
+                    if let Some(paren_end) = (bracket_end + 2..len).find(|&j| chars[j] == ')') {
+                        let text: String = chars[i + 1..bracket_end].iter().collect();
+                        let url: String = chars[bracket_end + 2..paren_end].iter().collect();
+                        out.push_str(&format!(
+                            "<a href=\"{}\">{}</a>",
+                            html_escape(&url),
+                            md_inline_to_html(&text)
+                        ));
+                        i = paren_end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // ![alt](url) image
+        if chars[i] == '!' && i + 1 < len && chars[i + 1] == '[' {
+            if let Some(bracket_end) = (i + 2..len).find(|&j| chars[j] == ']') {
+                if bracket_end + 1 < len && chars[bracket_end + 1] == '(' {
+                    if let Some(paren_end) = (bracket_end + 2..len).find(|&j| chars[j] == ')') {
+                        let alt: String = chars[i + 2..bracket_end].iter().collect();
+                        let url: String = chars[bracket_end + 2..paren_end].iter().collect();
+                        out.push_str(&format!(
+                            "<img alt=\"{}\" src=\"{}\">",
+                            html_escape(&alt),
+                            html_escape(&url)
+                        ));
+                        i = paren_end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // Pass through raw HTML tags like <u>, </u>, <sup>, </sup>, <sub>, </sub>
+        if chars[i] == '<' {
+            if let Some(end) = (i + 1..len).find(|&j| chars[j] == '>') {
+                let tag: String = chars[i..=end].iter().collect();
+                out.push_str(&tag);
+                i = end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Convert a single md paragraph/block to HTML body content.
+/// Returns (html_string, is_para) where is_para=true means it should get a translation slot.
+fn md_block_to_html(block: &str) -> (String, bool) {
+    let trimmed = block.trim();
+    if trimmed == "---" {
+        return ("<hr>".to_string(), false);
+    }
+    // Heading
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        return (format!("<h1>{}</h1>", md_inline_to_html(rest)), false);
+    }
+    if let Some(rest) = trimmed.strip_prefix("## ") {
+        return (format!("<h2>{}</h2>", md_inline_to_html(rest)), false);
+    }
+    if let Some(rest) = trimmed.strip_prefix("### ") {
+        return (format!("<h3>{}</h3>", md_inline_to_html(rest)), false);
+    }
+    if let Some(rest) = trimmed.strip_prefix("#### ") {
+        return (format!("<h4>{}</h4>", md_inline_to_html(rest)), false);
+    }
+    if let Some(rest) = trimmed.strip_prefix("##### ") {
+        return (format!("<h5>{}</h5>", md_inline_to_html(rest)), false);
+    }
+    if let Some(rest) = trimmed.strip_prefix("###### ") {
+        return (format!("<h6>{}</h6>", md_inline_to_html(rest)), false);
+    }
+    // Blockquote block: all lines start with "> "
+    if trimmed.lines().all(|l| l.trim_start().starts_with('>')) {
+        let inner: String = trimmed
+            .lines()
+            .map(|l| {
+                let s = l.trim_start().trim_start_matches('>');
+                let s = s.strip_prefix(' ').unwrap_or(s);
+                md_inline_to_html(s)
+            })
+            .collect::<Vec<_>>()
+            .join("<br>");
+        return (format!("<blockquote><p>{}</p></blockquote>", inner), false);
+    }
+    // List block: all lines start with "- " or digit. "
+    let is_ul = trimmed.lines().all(|l| {
+        let t = l.trim_start();
+        t.starts_with("- ") || t.is_empty()
+    });
+    let is_ol = !is_ul && trimmed.lines().all(|l| {
+        let t = l.trim_start();
+        t.is_empty() || t.chars().next().map_or(false, |c| c.is_ascii_digit())
+    });
+    if is_ul {
+        let items: String = trimmed
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let s = l.trim_start().strip_prefix("- ").unwrap_or(l.trim_start());
+                format!("<li>{}</li>", md_inline_to_html(s))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (format!("<ul>\n{}\n</ul>", items), false);
+    }
+    if is_ol {
+        let items: String = trimmed
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let s = l.trim_start();
+                // strip "N. " prefix
+                let s = if let Some(dot) = s.find(". ") { &s[dot + 2..] } else { s };
+                format!("<li>{}</li>", md_inline_to_html(s))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (format!("<ol>\n{}\n</ol>", items), false);
+    }
+    // Markdown table
+    if trimmed.contains('|') && trimmed.lines().count() >= 2 {
+        let lines: Vec<&str> = trimmed.lines().collect();
+        // Check for separator row (| --- |)
+        let has_sep = lines.iter().any(|l| l.contains("---"));
+        if has_sep {
+            let mut html = String::from("<table>\n");
+            let mut header_done = false;
+            for line in &lines {
+                if line.trim().contains("---") { continue; }
+                let cells: Vec<&str> = line.trim().trim_matches('|').split('|').collect();
+                if !header_done {
+                    html.push_str("<thead><tr>");
+                    for cell in &cells {
+                        html.push_str(&format!("<th>{}</th>", md_inline_to_html(cell.trim())));
+                    }
+                    html.push_str("</tr></thead>\n<tbody>\n");
+                    header_done = true;
+                } else {
+                    html.push_str("<tr>");
+                    for cell in &cells {
+                        html.push_str(&format!("<td>{}</td>", md_inline_to_html(cell.trim())));
+                    }
+                    html.push_str("</tr>\n");
+                }
+            }
+            html.push_str("</tbody></table>");
+            return (html, false);
+        }
+    }
+    // Regular paragraph — join lines with <br> if multiline
+    let html_lines: Vec<String> = trimmed
+        .lines()
+        .map(|l| md_inline_to_html(l))
+        .collect();
+    let inner = html_lines.join("<br>");
+    (inner, true)
 }
 
 fn generate_metadata_html(meta: &WorkMeta) -> String {
