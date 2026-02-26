@@ -33,8 +33,8 @@ import markdown as md_lib
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-MODEL = "claude-opus-4-6"
-# MODEL = "claude-sonnet-4-6"
+# MODEL = "claude-opus-4-6"
+MODEL = "claude-sonnet-4-6"
 BATCH_SIZE = 15          # paragraphs per API call
 MAX_RETRIES = 3
 RETRY_DELAY = 5          # seconds between retries
@@ -165,11 +165,32 @@ def _extract_section(text: str, start_pat: str, end_pat: str | None) -> str:
 
 # ── HTML patching ─────────────────────────────────────────────────────────────
 
-def _md_to_soup_contents(text: str):
-    """Convert markdown text to a list of BeautifulSoup nodes."""
+def _md_to_inner_html(text: str) -> str:
+    """Convert markdown text to HTML, stripping the outer <p> wrapper if present."""
     html = md_lib.markdown(text, extensions=["nl2br"])
+    # markdown() wraps single paragraphs in <p>...</p>; unwrap it to avoid
+    # nesting inside the existing <p class="trans-text"> / <p class="vocab-item">
     inner = BeautifulSoup(html, "lxml").body
-    return list(inner.children) if inner else []
+    if inner is None:
+        return text
+    # If the entire content is a single <p>, return its inner HTML
+    children = [c for c in inner.children if str(c).strip()]
+    if len(children) == 1 and getattr(children[0], "name", None) == "p":
+        return children[0].decode_contents()
+    return inner.decode_contents()
+
+
+def _set_element_html(element, md_text: str):
+    """Replace element content with rendered markdown, in-place."""
+    inner_html = _md_to_inner_html(md_text)
+    # Build a fresh element with the same tag and class, then replace
+    cls = element.get("class", [])
+    cls_str = " ".join(cls) if cls else ""
+    new_tag = BeautifulSoup(
+        f'<{element.name} class="{cls_str}">{inner_html}</{element.name}>',
+        "lxml"
+    ).find(element.name, class_=cls[0] if cls else True)
+    element.replace_with(new_tag)
 
 
 def patch_html(html_path: Path, translations: dict[int, dict]):
@@ -180,21 +201,19 @@ def patch_html(html_path: Path, translations: dict[int, dict]):
         block = soup.find(id=f"p{pid}")
         if not block:
             continue
+        # Remove stray bare <p> tags left by previous lxml p-in-p unwrapping
+        for stray in block.find_all("p", class_=False):
+            if not stray.get("class"):
+                stray.decompose()
         trans_p = block.select_one("p.trans-text")
         vocab_p = block.select_one("p.vocab-item")
         chunks_p = block.select_one("p.chunks")
         if trans_p is not None:
-            trans_p.clear()
-            for node in _md_to_soup_contents(data["translation"]):
-                trans_p.append(node)
+            _set_element_html(trans_p, data["translation"])
         if vocab_p is not None:
-            vocab_p.clear()
-            for node in _md_to_soup_contents(data["vocab"]):
-                vocab_p.append(node)
+            _set_element_html(vocab_p, data["vocab"])
         if chunks_p is not None:
-            chunks_p.clear()
-            for node in _md_to_soup_contents(data["chunks"]):
-                chunks_p.append(node)
+            _set_element_html(chunks_p, data["chunks"])
         changed += 1
     html_path.write_text(str(soup), encoding="utf-8")
     return changed
