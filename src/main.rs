@@ -1,4 +1,6 @@
 use clap::Parser;
+use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 use reqwest::blocking::Client;
 use scraper::{ElementRef, Html, Selector};
@@ -21,6 +23,14 @@ struct Args {
     /// Delay between requests in milliseconds
     #[arg(short, long, default_value_t = 1500)]
     delay: u64,
+
+    /// Max retry attempts per request
+    #[arg(short, long, default_value_t = 5)]
+    retries: u32,
+
+    /// Request timeout in seconds
+    #[arg(short, long, default_value_t = 60)]
+    timeout: u64,
 }
 
 #[derive(Debug)]
@@ -49,81 +59,253 @@ fn main() {
     let args = Args::parse();
 
     let work_id = extract_work_id(&args.url).expect("Could not extract work ID from URL");
-    println!("Work ID: {}", work_id);
 
     let client = Client::builder()
         .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0")
         .cookie_store(true)
+        .timeout(Duration::from_secs(args.timeout))
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .expect("Failed to build HTTP client");
 
-    // Fetch the full work page (all chapters in one page)
-    let full_url = format!(
-        "https://archiveofourown.org/works/{}?view_full_work=true&view_adult=true",
+    // -- Phase 1: Fetch navigate page to get chapter list & metadata --
+    let phase1_pb = ProgressBar::new_spinner();
+    phase1_pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    phase1_pb.set_message(format!(
+        "Fetching work {} navigate page...",
+        style(&work_id).bold()
+    ));
+    phase1_pb.enable_steady_tick(Duration::from_millis(80));
+
+    // First fetch the navigate page to get chapter URLs
+    let navigate_url = format!(
+        "https://archiveofourown.org/works/{}/navigate?view_adult=true",
         work_id
     );
-    println!("Fetching: {}", full_url);
+    let navigate_html = fetch_with_retry(&client, &navigate_url, args.retries, &phase1_pb);
+    let navigate_doc = Html::parse_document(&navigate_html);
 
-    let resp = client
-        .get(&full_url)
-        .send()
-        .expect("Failed to fetch work page");
+    // Extract chapter URLs from the navigation page
+    let chapter_links = extract_chapter_links(&navigate_doc);
 
-    if !resp.status().is_success() {
-        eprintln!("HTTP error: {}", resp.status());
-        std::process::exit(1);
-    }
+    // Also fetch the first chapter page (or single-chapter page) for metadata
+    let first_url = format!(
+        "https://archiveofourown.org/works/{}?view_adult=true",
+        work_id
+    );
+    thread::sleep(Duration::from_millis(args.delay));
+    phase1_pb.set_message("Fetching metadata...");
+    let first_html = fetch_with_retry(&client, &first_url, args.retries, &phase1_pb);
+    let first_doc = Html::parse_document(&first_html);
 
-    let html_text = resp.text().expect("Failed to read response body");
-    let document = Html::parse_document(&html_text);
+    let meta = extract_metadata(&first_doc);
+    phase1_pb.finish_with_message(format!(
+        "{} {} by {}",
+        style("Found:").green().bold(),
+        style(&meta.title).bold(),
+        style(if meta.authors.is_empty() {
+            "Unknown".to_string()
+        } else {
+            meta.authors.join(", ")
+        })
+        .dim()
+    ));
 
-    // Extract metadata
-    let meta = extract_metadata(&document);
-    println!("Title: {}", meta.title);
-    println!("Authors: {}", meta.authors.join(", "));
-
-    // Sanitize title for directory name
+    // Create output directory
     let dir_name = sanitize_filename::sanitize(&meta.title);
     let out_dir = PathBuf::from(&args.output).join(&dir_name);
     fs::create_dir_all(&out_dir).expect("Failed to create output directory");
 
-    // Write metadata file
+    // Write metadata
     let meta_md = format_metadata_md(&meta);
     let meta_path = out_dir.join("metadata.md");
     fs::write(&meta_path, &meta_md).expect("Failed to write metadata.md");
-    println!("Wrote: {}", meta_path.display());
+    eprintln!(
+        "  {} metadata.md",
+        style("wrote").green()
+    );
 
-    // Extract chapters
-    let chapters = extract_chapters(&document);
-    println!("Found {} chapter(s)", chapters.len());
+    // -- Phase 2: Fetch chapters with progress bar (pipeline: fetch -> parse -> write) --
+    if chapter_links.is_empty() {
+        // Single-chapter work: extract from first page
+        let pb = ProgressBar::new(1);
+        pb.set_style(chapter_progress_style());
+        pb.set_message("chapter1.md");
 
-    if chapters.is_empty() {
-        // Single-chapter work without chapter dividers
-        let content = extract_single_chapter_content(&document);
+        let content = extract_single_chapter_content(&first_doc);
         let chapter_path = out_dir.join("chapter1.md");
         fs::write(&chapter_path, &content).expect("Failed to write chapter");
-        println!("Wrote: {}", chapter_path.display());
-    } else {
-        for (i, (title, content)) in chapters.iter().enumerate() {
-            let filename = format!("chapter{}.md", i + 1);
-            let chapter_path = out_dir.join(&filename);
 
+        pb.inc(1);
+        pb.finish_with_message(format!("{} 1 chapter", style("Done!").green().bold()));
+    } else {
+        let total = chapter_links.len() as u64;
+        let pb = ProgressBar::new(total);
+        pb.set_style(chapter_progress_style());
+
+        // Pipeline: fetch each chapter individually, parse, write immediately
+        for (i, chapter_url) in chapter_links.iter().enumerate() {
+            let chapter_num = i + 1;
+            let filename = format!("chapter{}.md", chapter_num);
+            pb.set_message(format!("{}  (fetching)", filename));
+
+            // Fetch
+            if i > 0 {
+                // Delay between requests (skip for first since we already delayed after metadata)
+                thread::sleep(Duration::from_millis(args.delay));
+            }
+
+            let full_chapter_url = format!(
+                "https://archiveofourown.org{}?view_adult=true",
+                chapter_url
+            );
+            let chapter_html = fetch_with_retry(&client, &full_chapter_url, args.retries, &pb);
+
+            // Parse
+            pb.set_message(format!("{}  (parsing)", filename));
+            let chapter_doc = Html::parse_document(&chapter_html);
+
+            let title = chapter_doc
+                .select(&sel("h3.title"))
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+                .unwrap_or_default();
+
+            // Content is in div.userstuff[role='article'] or the first div#chapters > div.userstuff
+            let content = chapter_doc
+                .select(&sel("div.userstuff[role='article']"))
+                .next()
+                .or_else(|| chapter_doc.select(&sel("div#chapters div.userstuff")).next())
+                .map(|e| html_node_to_md(e))
+                .unwrap_or_default();
+
+            // Chapter notes
+            let chapter_notes_begin = chapter_doc
+                .select(&sel("div#chapters div.preface div.notes blockquote.userstuff"))
+                .next()
+                .map(|e| html_node_to_md(e))
+                .unwrap_or_default();
+            let chapter_notes_end = chapter_doc
+                .select(&sel("div#chapters div.end.notes blockquote"))
+                .next()
+                .map(|e| html_node_to_md(e))
+                .unwrap_or_default();
+
+            // Assemble
             let mut md = String::new();
             if !title.is_empty() {
                 md.push_str(&format!("# {}\n\n", title));
             }
-            md.push_str(content);
+            if !chapter_notes_begin.is_empty() {
+                md.push_str(&format!(
+                    "> **Chapter Notes:**\n>\n{}\n\n---\n\n",
+                    prefix_lines(&chapter_notes_begin, "> ")
+                ));
+            }
+            md.push_str(&content);
+            if !chapter_notes_end.is_empty() {
+                md.push_str(&format!(
+                    "\n\n---\n\n> **End Notes:**\n>\n{}",
+                    prefix_lines(&chapter_notes_end, "> ")
+                ));
+            }
 
+            // Write
+            let chapter_path = out_dir.join(&filename);
             fs::write(&chapter_path, &md).expect("Failed to write chapter file");
-            println!("Wrote: {}", chapter_path.display());
 
-            if i < chapters.len() - 1 {
-                thread::sleep(Duration::from_millis(args.delay));
+            pb.inc(1);
+        }
+
+        pb.finish_with_message(format!(
+            "{} {} chapters",
+            style("Done!").green().bold(),
+            total
+        ));
+    }
+
+    eprintln!(
+        "\n{}  {}",
+        style("Saved to:").green().bold(),
+        style(out_dir.display()).underlined()
+    );
+}
+
+fn chapter_progress_style() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(
+            "{spinner:.cyan} [{bar:40.cyan/dim}] {pos}/{len} {msg} ({elapsed_precise})",
+        )
+        .unwrap()
+        .progress_chars("━╸─")
+}
+
+/// Fetch a URL with retry + exponential backoff.
+fn fetch_with_retry(client: &Client, url: &str, max_retries: u32, pb: &ProgressBar) -> String {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match client.get(url).send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return resp.text().unwrap_or_default();
+                }
+                // Retry on 5xx or 429
+                if (status.is_server_error() || status.as_u16() == 429) && attempt <= max_retries {
+                    let wait = retry_delay(attempt, status.as_u16() == 429);
+                    pb.set_message(format!(
+                        "HTTP {} - retry {}/{} in {}s",
+                        status.as_u16(),
+                        attempt,
+                        max_retries,
+                        wait.as_secs()
+                    ));
+                    thread::sleep(wait);
+                    continue;
+                }
+                eprintln!("HTTP error {}: {}", status.as_u16(), url);
+                std::process::exit(1);
+            }
+            Err(e) => {
+                if attempt <= max_retries {
+                    let reason = if e.is_timeout() {
+                        "timeout"
+                    } else if e.is_connect() {
+                        "connect error"
+                    } else {
+                        "network error"
+                    };
+                    let wait = retry_delay(attempt, false);
+                    pb.set_message(format!(
+                        "{} - retry {}/{} in {}s",
+                        reason, attempt, max_retries, wait.as_secs()
+                    ));
+                    thread::sleep(wait);
+                    continue;
+                }
+                eprintln!("Request failed after {} attempts: {}", max_retries, e);
+                std::process::exit(1);
             }
         }
     }
+}
 
-    println!("\nDone! Files saved to: {}", out_dir.display());
+fn retry_delay(attempt: u32, is_rate_limit: bool) -> Duration {
+    let base = if is_rate_limit { 10 } else { 3 };
+    let secs = base * 2u64.pow(attempt.saturating_sub(1));
+    Duration::from_secs(secs.min(120))
+}
+
+/// Extract chapter URLs from the /navigate page.
+fn extract_chapter_links(doc: &Html) -> Vec<String> {
+    doc.select(&sel("ol.chapter.index.group li a"))
+        .filter_map(|e| e.value().attr("href").map(|s| s.to_string()))
+        .collect()
 }
 
 fn extract_work_id(url: &str) -> Option<String> {
@@ -147,7 +329,6 @@ fn extract_metadata(doc: &Html) -> WorkMeta {
         .map(|e| e.text().collect::<String>().trim().to_string())
         .collect();
     if authors.is_empty() {
-        // Fallback: try any link inside byline
         authors = doc
             .select(&sel("h3.byline a"))
             .map(|e| e.text().collect::<String>().trim().to_string())
@@ -155,7 +336,6 @@ fn extract_metadata(doc: &Html) -> WorkMeta {
             .collect();
     }
     if authors.is_empty() {
-        // Fallback: use the byline text directly
         if let Some(byline) = doc.select(&sel("h3.byline")).next() {
             let text = byline.text().collect::<String>().trim().to_string();
             if !text.is_empty() {
@@ -174,7 +354,6 @@ fn extract_metadata(doc: &Html) -> WorkMeta {
     let language = extract_tag_list(doc, "dd.language");
     let series = extract_tag_list_vec(doc, "dd.series");
 
-    // Stats
     let mut stats = HashMap::new();
     let stats_sel = sel("dl.stats");
     if let Some(stats_dl) = doc.select(&stats_sel).next() {
@@ -182,7 +361,13 @@ fn extract_metadata(doc: &Html) -> WorkMeta {
         let dd_sel = sel("dd");
         let dts: Vec<String> = stats_dl
             .select(&dt_sel)
-            .map(|e| e.text().collect::<String>().trim().trim_end_matches(':').to_string())
+            .map(|e| {
+                e.text()
+                    .collect::<String>()
+                    .trim()
+                    .trim_end_matches(':')
+                    .to_string()
+            })
             .collect();
         let dds: Vec<String> = stats_dl
             .select(&dd_sel)
@@ -193,21 +378,18 @@ fn extract_metadata(doc: &Html) -> WorkMeta {
         }
     }
 
-    // Summary
     let summary = doc
         .select(&sel("div.preface .summary blockquote"))
         .next()
         .map(|e| html_node_to_md(e))
         .unwrap_or_default();
 
-    // Notes (beginning)
     let notes_begin = doc
         .select(&sel("div.preface .notes blockquote"))
         .next()
         .map(|e| html_node_to_md(e))
         .unwrap_or_default();
 
-    // Notes (end)
     let notes_end = doc
         .select(&sel("div.afterword .end.notes blockquote"))
         .next()
@@ -334,7 +516,6 @@ fn format_metadata_md(meta: &WorkMeta) -> String {
 
     md.push('\n');
 
-    // Stats
     md.push_str("## Stats\n\n");
     md.push_str("| Stat | Value |\n");
     md.push_str("| --- | --- |\n");
@@ -346,7 +527,6 @@ fn format_metadata_md(meta: &WorkMeta) -> String {
             md.push_str(&format!("| **{}** | {} |\n", key, val));
         }
     }
-    // Include any stats not in the standard list
     for (k, v) in &meta.stats {
         if !stat_keys.contains(&k.as_str())
             && k != "Published"
@@ -359,7 +539,6 @@ fn format_metadata_md(meta: &WorkMeta) -> String {
     }
     md.push('\n');
 
-    // Tags
     if !meta.additional_tags.is_empty() {
         md.push_str("## Tags\n\n");
         for tag in &meta.additional_tags {
@@ -368,7 +547,6 @@ fn format_metadata_md(meta: &WorkMeta) -> String {
         md.push('\n');
     }
 
-    // Series
     if !meta.series.is_empty() {
         md.push_str("## Series\n\n");
         for s in &meta.series {
@@ -377,14 +555,12 @@ fn format_metadata_md(meta: &WorkMeta) -> String {
         md.push('\n');
     }
 
-    // Summary
     if !meta.summary.is_empty() {
         md.push_str("## Summary\n\n");
         md.push_str(&meta.summary);
         md.push_str("\n\n");
     }
 
-    // Notes
     if !meta.notes_begin.is_empty() {
         md.push_str("## Notes (Beginning)\n\n");
         md.push_str(&meta.notes_begin);
@@ -400,75 +576,10 @@ fn format_metadata_md(meta: &WorkMeta) -> String {
     md
 }
 
-fn extract_chapters(doc: &Html) -> Vec<(String, String)> {
-    // Use id pattern to only match top-level chapter divs (div#chapter-1, div#chapter-2, ...)
-    // NOT the inner div.chapter.preface.group which also has class "chapter"
-    let chapter_sel = sel("div[id^='chapter-']");
-    let chapters: Vec<ElementRef> = doc.select(&chapter_sel).collect();
-
-    if chapters.is_empty() {
-        return vec![];
-    }
-
-    let mut result = Vec::new();
-
-    for chapter_el in chapters {
-        // Chapter title
-        let title = chapter_el
-            .select(&sel("h3.title"))
-            .next()
-            .map(|e| {
-                let text = e.text().collect::<String>();
-                text.trim().to_string()
-            })
-            .unwrap_or_default();
-
-        // Chapter content - must be div.userstuff with role="article" (the actual body)
-        // NOT blockquote.userstuff (which appears in chapter notes)
-        let content = chapter_el
-            .select(&sel("div.userstuff[role='article']"))
-            .next()
-            .map(|e| html_node_to_md(e))
-            .unwrap_or_default();
-
-        // Chapter-level notes (beginning) - inside the preface group's notes module
-        let chapter_notes_begin = chapter_el
-            .select(&sel("div.preface div.notes blockquote.userstuff"))
-            .next()
-            .map(|e| html_node_to_md(e))
-            .unwrap_or_default();
-
-        // Chapter-level notes (end)
-        let chapter_notes_end = chapter_el
-            .select(&sel("div.end.notes blockquote"))
-            .next()
-            .map(|e| html_node_to_md(e))
-            .unwrap_or_default();
-
-        let mut full_content = String::new();
-        if !chapter_notes_begin.is_empty() {
-            full_content.push_str(&format!(
-                "> **Chapter Notes:**\n>\n{}\n\n---\n\n",
-                prefix_lines(&chapter_notes_begin, "> ")
-            ));
-        }
-        full_content.push_str(&content);
-        if !chapter_notes_end.is_empty() {
-            full_content.push_str(&format!(
-                "\n\n---\n\n> **End Notes:**\n>\n{}",
-                prefix_lines(&chapter_notes_end, "> ")
-            ));
-        }
-
-        result.push((title, full_content));
-    }
-
-    result
-}
-
 fn extract_single_chapter_content(doc: &Html) -> String {
-    doc.select(&sel("div.userstuff"))
+    doc.select(&sel("div.userstuff[role='article']"))
         .next()
+        .or_else(|| doc.select(&sel("div.userstuff")).next())
         .map(|e| html_node_to_md(e))
         .unwrap_or_else(|| "No content found.".to_string())
 }
@@ -477,7 +588,6 @@ fn extract_single_chapter_content(doc: &Html) -> String {
 fn html_node_to_md(el: ElementRef) -> String {
     let mut output = String::new();
     process_children(el, &mut output, &InlineCtx::default());
-    // Clean up excessive blank lines
     let re = Regex::new(r"\n{3,}").unwrap();
     let output = re.replace_all(&output, "\n\n").to_string();
     output.trim().to_string()
@@ -571,7 +681,8 @@ fn process_children(el: ElementRef, out: &mut String, ctx: &InlineCtx) {
                                 // Skip AO3 landmark/accessibility headings
                             } else {
                                 let level = &tag[1..2];
-                                let prefix = "#".repeat(level.parse::<usize>().unwrap_or(1));
+                                let prefix =
+                                    "#".repeat(level.parse::<usize>().unwrap_or(1));
                                 out.push_str(&format!("\n\n{} ", prefix));
                                 process_children(child_ref, out, ctx);
                                 out.push_str("\n\n");
@@ -642,7 +753,6 @@ fn process_children(el: ElementRef, out: &mut String, ctx: &InlineCtx) {
                         }
                         "span" => {
                             let class = elem.attr("class").unwrap_or("");
-                            // Skip AO3 landmark headings like "Chapter Text"
                             if class.contains("landmark") {
                                 // skip
                             } else {
