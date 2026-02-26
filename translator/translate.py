@@ -32,7 +32,9 @@ from bs4 import BeautifulSoup
 import markdown as md_lib
 
 # ── config ────────────────────────────────────────────────────────────────────
+
 MODEL = "claude-opus-4-6"
+# MODEL = "claude-sonnet-4-6"
 BATCH_SIZE = 15          # paragraphs per API call
 MAX_RETRIES = 3
 RETRY_DELAY = 5          # seconds between retries
