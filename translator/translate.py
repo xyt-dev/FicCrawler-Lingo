@@ -35,7 +35,7 @@ import markdown as md_lib
 
 # MODEL = "claude-opus-4-6"
 MODEL = "claude-sonnet-4-6"
-BATCH_SIZE = 15          # paragraphs per API call
+BATCH_SIZE = 5          # paragraphs per API call
 MAX_RETRIES = 3
 RETRY_DELAY = 5          # seconds between retries
 
@@ -124,14 +124,10 @@ def call_claude(client: anthropic.Anthropic, prompt_txt: str,
 def parse_response(response: str) -> dict[int, dict]:
     """
     Parse Claude's output into {para_id: {translation, vocab, chunks}}.
-    Expects sections like:
-        ### p3
-        **Translation:**
-        ...
-        **Vocabulary ...**
-        ...
-        **Chunks ...**
-        ...
+    Handles both plain and bold-marked section headers, e.g.:
+        Translation:  or  **Translation:**
+        Vocabulary (>IELTS 6.5):  or  **Vocabulary ...**
+        Chunks (>IELTS 6.5):  or  **Chunks ...**
     """
     result = {}
     parts = re.split(r"###\s+p(\d+)", response)
@@ -140,9 +136,9 @@ def parse_response(response: str) -> dict[int, dict]:
     next(it)  # skip preamble
     for pid_str, body in zip(it, it):
         pid = int(pid_str)
-        translation = _extract_section(body, r"\*\*Translation[^*]*\*\*", r"\*\*Vocabulary")
-        vocab = _extract_section(body, r"\*\*Vocabulary[^*]*\*\*", r"\*\*Chunks")
-        chunks = _extract_section(body, r"\*\*Chunks[^*]*\*\*", None)
+        translation = _extract_section(body, r"\*{0,2}Translation[^:\n]*:\*{0,2}", r"\*{0,2}Vocabulary")
+        vocab = _extract_section(body, r"\*{0,2}Vocabulary[^:\n]*:\*{0,2}", r"\*{0,2}Chunks")
+        chunks = _extract_section(body, r"\*{0,2}Chunks[^:\n]*:\*{0,2}", None)
         result[pid] = {
             "translation": translation.strip(),
             "vocab": vocab.strip(),
@@ -206,8 +202,8 @@ def patch_html(html_path: Path, translations: dict[int, dict]):
             if not stray.get("class"):
                 stray.decompose()
         trans_p = block.select_one("p.trans-text")
-        vocab_p = block.select_one("p.vocab-item")
-        chunks_p = block.select_one("p.chunks")
+        vocab_p = block.select_one(".vocab-item")
+        chunks_p = block.select_one(".chunks")
         if trans_p is not None:
             _set_element_html(trans_p, data["translation"])
         if vocab_p is not None:
@@ -238,7 +234,7 @@ def translate_chapter(client: anthropic.Anthropic, prompt_txt: str,
 
     progress = load_progress(prog_path)
     todo = [(pid, text) for pid, text in paragraphs
-            if str(pid) not in progress]
+            if not progress.get(str(pid), {}).get("translation")]
 
     print(f"  chapter{chapter_num}: {len(paragraphs)} paras total, "
           f"{len(todo)} remaining", flush=True)

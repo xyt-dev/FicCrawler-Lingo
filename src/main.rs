@@ -934,8 +934,8 @@ fn generate_chapter_html(
                  <p class=\"trans-text\"></p>\n\
                  <details class=\"vocab\"><summary>Vocabulary &amp; Chunks</summary>\n\
                  <div class=\"vocab-content\">\n\
-                 <p class=\"vocab-item\"></p>\n\
-                 <p class=\"chunks\"></p>\n\
+                 <div class=\"vocab-item\"></div>\n\
+                 <div class=\"chunks\"></div>\n\
                  </div>\n\
                  </details>\n\
                  </div>\n\
@@ -1383,8 +1383,8 @@ em, i { font-style: italic; }
   background: var(--vocab-bg); border: 1px solid var(--vocab-border);
   border-radius: 0.3rem; padding: 0.5rem 0.7rem; margin-top: 0.3rem;
 }
-.vocab-item:empty::before { content: "Word (pos) /phonetic/ — definition  e.g. ..."; color: var(--muted); opacity: 0.4; }
-.chunks:empty::before { content: "Chunks: phrase1, phrase2, ..."; color: var(--muted); opacity: 0.4; }
+.vocab-item::before { content: "Vocabulary"; display: block; color: var(--muted); opacity: 0.6; font-size: 0.8rem; font-weight: 600; margin-bottom: 0.2rem; }
+.chunks::before { content: "Chunks"; display: block; color: var(--muted); opacity: 0.6; font-size: 0.8rem; font-weight: 600; margin-bottom: 0.2rem; }
 
 .chapter-notes {
   background: var(--note-bg); border: 1px solid var(--note-border);
@@ -1411,48 +1411,46 @@ For each paragraph, output the following structure (keep the paragraph ID):
 
 ### p[N]
 
-**Translation:**
-[Fluent, natural Chinese translation that preserves the tone, style, and literary quality of the original. Use 「」 for dialogue. Do not translate proper nouns — keep character names, place names, and faction names in English.]
+Translation:
+[Fluent, natural Chinese translation. Use 「」 for dialogue. Do not translate proper nouns.]
 
-**Vocabulary (>IETLS 6.5):**
+Vocabulary (>IETLS 6.5):
 - **word** (part_of_speech) /phonetic/ — Chinese definition
-  - Example: [a short example sentence from the text or a common usage]
-- **word2** (part_of_speech) /phonetic/ — Chinese definition
-  - Example: ...
-[List 3-8 important or difficult words per paragraph. Skip common words (the, is, a, etc.). Prioritize: domain-specific terms, literary vocabulary, phrasal verbs, idioms.]
+  Example: [a short example sentence from the text or a common usage]
+[List 3-8 single words. Use **bold** for the word.]
 
-**Chunks (>IETLS 6.5):**
-- **phrase/collocation** — meaning in Chinese; usage note if needed
-- **phrase2** — meaning
-[List 2-5 useful multi-word expressions, collocations, or idiomatic phrases from the paragraph.]
+Chunks (>IETLS 6.5):
+- **phrase/collocation** (type) — Chinese definition
+  Example: [a short example sentence showing how this phrase is used]
+[List 2-5 multi-word expressions. Use **bold** for the phrase.]
 
 ---
 
-## Guidelines
-1. Translation should read naturally in Chinese — it is literary translation, not word-for-word
-2. Keep the author's tone: if humorous, stay humorous; if tense, stay tense
-3. For vocabulary, focus on words a B2-C1 English learner might not know
-4. Phonetic notation uses IPA (International Phonetic Alphabet)
-5. Chunks should be phrases that are reusable in other contexts
-6. If a paragraph is very short (< 10 words) or is just a scene break / date header, you may write "N/A" for vocabulary and chunks
-7. Process ALL paragraphs — do not skip any
+## Strict Guidelines
+1. **Formatting**: Each vocabulary/chunk item MUST start with a hyphen, use **bold** for the headword/phrase, and MUST include an 'Example:' line on the next line (indented).
+2. **Distinction**: Do not mix single words into the Chunks section.
+3. **Phonetics**: Use IPA for Vocabulary.
+4. **Tone**: Preserve the literary quality of the AO3 original.
+5. **Coverage**: Process ALL paragraphs (p1, p2, ...). If short, use "N/A".
 
 ## Example Output
 
 ### p1
 
-**Translation:**
-阳光透过古老的彩色玻璃窗倾泻而入，在石板地面上投下万花筒般的图案，将整个大厅染上了一层温暖而空灵的光辉。
+Translation:
+阳光透过古老的彩色玻璃窗倾泻而入，在石板地面上投下万花筒般的图案。
 
-**Vocabulary:**
+Vocabulary:
 - **kaleidoscope** (n) /kəˈlaɪdəskoʊp/ — 万花筒；千变万化的景象
-  - Example: The garden was a kaleidoscope of colors in spring.
+  Example: The garden was a kaleidoscope of colors in spring.
 - **ethereal** (adj) /ɪˈθɪriəl/ — 空灵的，超凡脱俗的
-  - Example: The music had an ethereal quality that captivated everyone.
+  Example: The music had an ethereal quality.
 
-**Chunks:**
-- **cast patterns on** — 在……上投下图案
-- **bathe in light** — 沐浴在光辉中
+Chunks:
+- **cast patterns on** (v. phr) — 在……上投下图案
+  Example: The moonlight cast strange patterns on the bedroom wall.
+- **bathe in** (v. phr) — 沐浴在……之中
+  Example: The entire valley was bathed in a golden sunset.
 
 ---
 
