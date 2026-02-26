@@ -1,6 +1,8 @@
 [English](README.md)
 
-# AO3 爬虫 — 英语阅读学习工具
+# FicCrawler&Lingo
+
+![logo](assets/logo.png)
 
 一个用 Rust 编写的命令行工具，将 [Archive of Our Own](https://archiveofourown.org) 的同人小说爬取为 **Markdown** 和 **学习用 HTML** 文件，HTML 中内置了逐段翻译/生词/搭配的填空位，专为配合大语言模型使用而设计。
 
@@ -95,7 +97,7 @@ books/
 
 ### 配合大模型使用 — 自动化方式（`translator/`）
 
-`translator/` 子项目通过 Claude API 将上述流程完全自动化：
+`translator/` 模块通过 Claude API 将上述流程完全自动化：
 
 ```bash
 cd translator

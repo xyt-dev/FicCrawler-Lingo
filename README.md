@@ -1,6 +1,8 @@
 [中文版](README_zh.md)
 
-# AO3 Scraper — English Reading & Study Tool
+# FicCrawler&Lingo
+
+![logo](assets/logo.png)
 
 A Rust CLI tool that scrapes [Archive of Our Own](https://archiveofourown.org) fanfiction works into **Markdown** and **study-ready HTML** files with built-in translation/vocabulary slots designed for use with LLMs.
 
@@ -96,7 +98,7 @@ The prompt is designed to work with **any major LLM** and produces consistent, s
 
 ### Using with LLMs — Automated (`translator/`)
 
-The `translator/` sub-project automates the above process end-to-end using the Claude API:
+The `translator/` module automates the above process end-to-end using the Claude API:
 
 ```bash
 cd translator
