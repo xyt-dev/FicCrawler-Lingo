@@ -96,9 +96,9 @@ Each chapter HTML file features:
 
 The prompt is designed to work with **any major LLM** and produces consistent, structured output.
 
-### Using with LLMs — Automated (`translator/`)
+### Using with Claude API — Automated (`translator/`)
 
-The `translator/` module automates the above process end-to-end using the Claude API:
+The `translator/` module automates the above process end-to-end using the **Claude API** (requires an Anthropic API key):
 
 ```bash
 cd translator

@@ -95,9 +95,9 @@ books/
 
 提示词设计为**兼容所有主流大模型**，并能产出一致的结构化输出。
 
-### 配合大模型使用 — 自动化方式（`translator/`）
+### 配合 Claude API 使用 — 自动化方式（`translator/`）
 
-`translator/` 模块通过 Claude API 将上述流程完全自动化：
+`translator/` 模块通过 **Claude API** 将上述流程完全自动化（需要 Anthropic API Key）：
 
 ```bash
 cd translator
