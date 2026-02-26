@@ -31,13 +31,13 @@ cargo build --release
 
 ```bash
 # 基本用法 — 爬取到 ./books/<作品名>/
-ao3-scraper "https://archiveofourown.org/works/27526954/chapters/67317511"
+ao3-scraper "https://archiveofourown.org/works/<number>/chapters/<number>"
 
 # 使用浏览器 Cookie（Cloudflare 拦截时必须）
-ao3-scraper "https://archiveofourown.org/works/12345" --cookies ~/ao3_cookies.txt
+ao3-scraper "https://archiveofourown.org/works/<number>/chapters/<number>" --cookies ./cookies.txt
 
 # 自定义输出目录
-ao3-scraper "https://archiveofourown.org/works/12345" -o my-reading
+ao3-scraper "https://archiveofourown.org/works/<number>/chapters/<number>" -o my-reading
 
 # 所有选项
 ao3-scraper <URL> [选项]
@@ -109,14 +109,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export ANTHROPIC_API_KEY=$ANTHROPIC_AUTH_TOKEN
 
 # 翻译整本书的所有章节
-.venv/bin/python translate.py "../books/A Ruinous Gift"
+.venv/bin/python translate.py "../books/Work Title"
 
 # 只翻译指定章节
-.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1
+.venv/bin/python translate.py "../books/Work Title" --chapter 1
 
 # 从已有的 progress.json 重新渲染 HTML，不调用 API
 # （手动编辑 progress.json 后使用）
-.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1 --repatch
+.venv/bin/python translate.py "../books/Work Title" --chapter 1 --repatch
 ```
 
 - 每次 API 调用处理 15 个段落（分批处理）
@@ -140,6 +140,7 @@ HTML 中每个段落块的结构：
 │    word (词性) /音标/ — 释义       │
 │      Example: 例句                │
 │    Chunks: 短语搭配 — 含义         │
+│      Example: 例句                │
 └──────────────────────────────────┘
 ```
 

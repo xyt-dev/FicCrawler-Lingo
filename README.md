@@ -31,13 +31,13 @@ Binary will be at `target/release/ao3-scraper`.
 
 ```bash
 # Basic — scrapes to ./books/<WorkTitle>/
-ao3-scraper "https://archiveofourown.org/works/27526954/chapters/67317511"
+ao3-scraper "https://archiveofourown.org/works/<number>/chapters/<number>"
 
 # With browser cookies (required if Cloudflare blocks you)
-ao3-scraper "https://archiveofourown.org/works/12345" --cookies ~/ao3_cookies.txt
+ao3-scraper "https://archiveofourown.org/works/<number>/chapters/<number>" --cookies ./cookies.txt
 
 # Custom output directory
-ao3-scraper "https://archiveofourown.org/works/12345" -o my-reading
+ao3-scraper "https://archiveofourown.org/works/<number>/chapters/<number>" -o my-reading
 
 # All options
 ao3-scraper <URL> [OPTIONS]
@@ -110,14 +110,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export ANTHROPIC_API_KEY=$ANTHROPIC_AUTH_TOKEN
 
 # Translate all chapters of a book
-.venv/bin/python translate.py "../books/A Ruinous Gift"
+.venv/bin/python translate.py "../books/Work Title"
 
 # Single chapter only
-.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1
+.venv/bin/python translate.py "../books/Work Title" --chapter 1
 
 # Re-patch HTML from existing progress.json without calling the API
 # (useful after manually editing progress.json)
-.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1 --repatch
+.venv/bin/python translate.py "../books/Work Title" --chapter 1 --repatch
 ```
 
 - Splits each chapter into batches of 15 paragraphs per API call
@@ -141,6 +141,7 @@ Each paragraph block in the HTML:
 │    word (pos) /IPA/ — meaning   │
 │      Example: ...               │
 │    Chunks: phrase — meaning     │
+│      Example: ...               │
 └─────────────────────────────────┘
 ```
 
