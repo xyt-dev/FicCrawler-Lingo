@@ -113,11 +113,16 @@ export ANTHROPIC_API_KEY=$ANTHROPIC_AUTH_TOKEN
 
 # 只翻译指定章节
 .venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1
+
+# 从已有的 progress.json 重新渲染 HTML，不调用 API
+# （手动编辑 progress.json 后使用）
+.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1 --repatch
 ```
 
 - 每次 API 调用处理 15 个段落（分批处理）
 - 每批完成后立即写入 `chapter{N}.progress.json`，中断后可随时续跑
-- 翻译/生词/搭配直接回填到 `chapter{N}.html` 对应节点
+- 翻译/生词/搭配直接回填到 `chapter{N}.html`，支持 Markdown 渲染（加粗、列表等转为 HTML）
+- `--repatch`：跳过 API 调用，直接从 `progress.json` 重新写入 HTML，无需 API Key
 
 详见 [`translator/README.md`](translator/README.md)。
 

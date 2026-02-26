@@ -114,11 +114,16 @@ export ANTHROPIC_API_KEY=$ANTHROPIC_AUTH_TOKEN
 
 # Single chapter only
 .venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1
+
+# Re-patch HTML from existing progress.json without calling the API
+# (useful after manually editing progress.json)
+.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1 --repatch
 ```
 
 - Splits each chapter into batches of 15 paragraphs per API call
 - Saves progress to `chapter{N}.progress.json` after each batch — safe to interrupt and resume
-- Patches translation/vocabulary/chunks directly into `chapter{N}.html`
+- Patches translation/vocabulary/chunks directly into `chapter{N}.html`, rendering Markdown (bold, lists) as HTML
+- `--repatch`: skip API calls and re-write HTML from the existing `progress.json` — no API key needed
 
 See [`translator/README.md`](translator/README.md) for full details.
 
