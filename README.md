@@ -84,7 +84,7 @@ Each chapter HTML file features:
   4. **Chunks section** — slots for useful collocations and phrases
 - Chapter navigation (previous / next / index)
 
-### Using with LLMs
+### Using with LLMs — Manual
 
 1. Open `prompt.txt` — it contains a ready-to-use prompt
 2. Copy the prompt into any LLM (ChatGPT, Claude, Gemini, DeepSeek, Kimi, etc.)
@@ -93,6 +93,30 @@ Each chapter HTML file features:
 5. Fill the results into the corresponding `chapterN.html` slots
 
 The prompt is designed to work with **any major LLM** and produces consistent, structured output.
+
+### Using with LLMs — Automated (`translator/`)
+
+The `translator/` sub-project automates the above process end-to-end using the Claude API:
+
+```bash
+cd translator
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Translate all chapters of a book
+.venv/bin/python translate.py "../books/A Ruinous Gift"
+
+# Single chapter only
+.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1
+```
+
+- Splits each chapter into batches of 15 paragraphs per API call
+- Saves progress to `chapter{N}.progress.json` after each batch — safe to interrupt and resume
+- Patches translation/vocabulary/chunks directly into `chapter{N}.html`
+
+See [`translator/README.md`](translator/README.md) for full details.
 
 ## Translation Slot Structure
 

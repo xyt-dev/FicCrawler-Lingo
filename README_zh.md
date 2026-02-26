@@ -83,7 +83,7 @@ books/
   3. **生词区域**（可折叠）— 词性、音标、释义、例句
   4. **搭配区域** — 常用词组和短语搭配
 
-### 配合大模型使用
+### 配合大模型使用 — 手动方式
 
 1. 打开 `prompt.txt` — 内含即用型提示词
 2. 将提示词复制到任意大模型（ChatGPT、Claude、Gemini、DeepSeek、Kimi 等）
@@ -92,6 +92,30 @@ books/
 5. 将结果填入对应的 `chapterN.html` 中的空位
 
 提示词设计为**兼容所有主流大模型**，并能产出一致的结构化输出。
+
+### 配合大模型使用 — 自动化方式（`translator/`）
+
+`translator/` 子项目通过 Claude API 将上述流程完全自动化：
+
+```bash
+cd translator
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 翻译整本书的所有章节
+.venv/bin/python translate.py "../books/A Ruinous Gift"
+
+# 只翻译指定章节
+.venv/bin/python translate.py "../books/A Ruinous Gift" --chapter 1
+```
+
+- 每次 API 调用处理 15 个段落（分批处理）
+- 每批完成后立即写入 `chapter{N}.progress.json`，中断后可随时续跑
+- 翻译/生词/搭配直接回填到 `chapter{N}.html` 对应节点
+
+详见 [`translator/README.md`](translator/README.md)。
 
 ## 翻译填空结构
 

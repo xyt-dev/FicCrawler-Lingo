@@ -1,12 +1,12 @@
 # translator
 
-Batch-translates EnglishReading HTML chapters using Claude API.
+Batch-translates EnglishReading HTML chapters using the Claude API.
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install anthropic beautifulsoup4 lxml
+.venv/bin/pip install -r requirements.txt
 ```
 
 ## Usage
@@ -23,21 +23,24 @@ export ANTHROPIC_API_KEY=sk-ant-...
 # Dry-run (no API calls, just show batches)
 .venv/bin/python translate.py "../books/A Ruinous Gift" --dry-run
 
-# Custom batch size
+# Custom batch size (default: 15)
 .venv/bin/python translate.py "../books/A Ruinous Gift" --batch-size 10
 ```
 
 ## How it works
 
-1. Reads `chapter{N}.md` to extract paragraphs (mirrors the Rust `md_block_to_html` logic — only plain text blocks get a `para-block` in the HTML)
-2. Splits into batches of 15 paragraphs
-3. Calls Claude with `prompt.txt` + the batch text
+1. Reads `chapter{N}.md` to extract paragraphs — mirrors the Rust `md_block_to_html` logic, so only plain-text blocks that have a `para-block` in the HTML are included
+2. Splits into batches of 15 paragraphs per API call
+3. Sends `prompt.txt` + batch text to Claude
 4. Parses `### p[N]` sections from the response
-5. Fills `<p class="trans-text">`, `<p class="vocab-item">`, `<p class="chunks">` in `chapter{N}.html`
-6. Saves progress to `chapter{N}.progress.json` — interrupted runs resume where they left off
+5. Saves parsed results to `chapter{N}.progress.json` immediately after each batch
+6. After all batches complete, patches `<p class="trans-text">`, `<p class="vocab-item">`, `<p class="chunks">` in `chapter{N}.html`
 
-## Resume / idempotency
+## Resume on interruption
 
-Progress is saved after each batch. If the run is interrupted, just re-run the same command — already-translated paragraphs are skipped.
+Progress is saved to `chapter{N}.progress.json` after every batch.
+If the run is interrupted (Ctrl+C, crash, etc.), re-run the same command —
+already-translated paragraphs are skipped and the run continues from where it left off.
 
-If a batch fails to parse, the raw API response is saved to `chapter{N}.debug.{start_para}.txt` for inspection.
+If a batch fails to parse, the raw API response is saved to
+`chapter{N}.debug.{start_para}.txt` for inspection.
