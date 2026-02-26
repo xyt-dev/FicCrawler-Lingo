@@ -16,8 +16,8 @@ struct Args {
     /// AO3 work URL (e.g. https://archiveofourown.org/works/12345)
     url: String,
 
-    /// Output directory (default: current directory)
-    #[arg(short, long, default_value = ".")]
+    /// Output directory (default: ./books)
+    #[arg(short, long, default_value = "books")]
     output: String,
 
     /// Delay between requests in milliseconds
@@ -81,18 +81,14 @@ fn main() {
     ));
     phase1_pb.enable_steady_tick(Duration::from_millis(80));
 
-    // First fetch the navigate page to get chapter URLs
     let navigate_url = format!(
         "https://archiveofourown.org/works/{}/navigate?view_adult=true",
         work_id
     );
     let navigate_html = fetch_with_retry(&client, &navigate_url, args.retries, &phase1_pb);
     let navigate_doc = Html::parse_document(&navigate_html);
-
-    // Extract chapter URLs from the navigation page
     let chapter_links = extract_chapter_links(&navigate_doc);
 
-    // Also fetch the first chapter page (or single-chapter page) for metadata
     let first_url = format!(
         "https://archiveofourown.org/works/{}?view_adult=true",
         work_id
@@ -122,23 +118,34 @@ fn main() {
 
     // Write metadata
     let meta_md = format_metadata_md(&meta);
-    let meta_path = out_dir.join("metadata.md");
-    fs::write(&meta_path, &meta_md).expect("Failed to write metadata.md");
-    eprintln!(
-        "  {} metadata.md",
-        style("wrote").green()
-    );
+    fs::write(out_dir.join("metadata.md"), &meta_md).expect("Failed to write metadata.md");
+    fs::write(
+        out_dir.join("metadata.html"),
+        &generate_metadata_html(&meta),
+    )
+    .expect("Failed to write metadata.html");
+    eprintln!("  {} metadata.md + metadata.html", style("wrote").green());
 
-    // -- Phase 2: Fetch chapters with progress bar (pipeline: fetch -> parse -> write) --
+    // Write prompt file
+    let prompt = generate_prompt(&meta.title);
+    fs::write(out_dir.join("prompt.txt"), &prompt).expect("Failed to write prompt.txt");
+    eprintln!("  {} prompt.txt", style("wrote").green());
+
+    // -- Phase 2: Fetch chapters with progress bar --
     if chapter_links.is_empty() {
-        // Single-chapter work: extract from first page
         let pb = ProgressBar::new(1);
         pb.set_style(chapter_progress_style());
-        pb.set_message("chapter1.md");
+        pb.set_message("chapter1");
 
-        let content = extract_single_chapter_content(&first_doc);
-        let chapter_path = out_dir.join("chapter1.md");
-        fs::write(&chapter_path, &content).expect("Failed to write chapter");
+        let content_md = extract_single_chapter_content(&first_doc);
+        fs::write(out_dir.join("chapter1.md"), &content_md).expect("Failed to write chapter");
+
+        let content_el = first_doc
+            .select(&sel("div.userstuff[role='article']"))
+            .next()
+            .or_else(|| first_doc.select(&sel("div.userstuff")).next());
+        let study_html = generate_chapter_html("Chapter 1", content_el, None, None, 1);
+        fs::write(out_dir.join("chapter1.html"), &study_html).expect("Failed to write html");
 
         pb.inc(1);
         pb.finish_with_message(format!("{} 1 chapter", style("Done!").green().bold()));
@@ -147,15 +154,12 @@ fn main() {
         let pb = ProgressBar::new(total);
         pb.set_style(chapter_progress_style());
 
-        // Pipeline: fetch each chapter individually, parse, write immediately
         for (i, chapter_url) in chapter_links.iter().enumerate() {
             let chapter_num = i + 1;
-            let filename = format!("chapter{}.md", chapter_num);
+            let filename = format!("chapter{}", chapter_num);
             pb.set_message(format!("{}  (fetching)", filename));
 
-            // Fetch
             if i > 0 {
-                // Delay between requests (skip for first since we already delayed after metadata)
                 thread::sleep(Duration::from_millis(args.delay));
             }
 
@@ -163,9 +167,9 @@ fn main() {
                 "https://archiveofourown.org{}?view_adult=true",
                 chapter_url
             );
-            let chapter_html = fetch_with_retry(&client, &full_chapter_url, args.retries, &pb);
+            let chapter_html =
+                fetch_with_retry(&client, &full_chapter_url, args.retries, &pb);
 
-            // Parse
             pb.set_message(format!("{}  (parsing)", filename));
             let chapter_doc = Html::parse_document(&chapter_html);
 
@@ -175,15 +179,18 @@ fn main() {
                 .map(|e| e.text().collect::<String>().trim().to_string())
                 .unwrap_or_default();
 
-            // Content is in div.userstuff[role='article'] or the first div#chapters > div.userstuff
+            // -- Markdown --
             let content = chapter_doc
                 .select(&sel("div.userstuff[role='article']"))
                 .next()
-                .or_else(|| chapter_doc.select(&sel("div#chapters div.userstuff")).next())
+                .or_else(|| {
+                    chapter_doc
+                        .select(&sel("div#chapters div.userstuff"))
+                        .next()
+                })
                 .map(|e| html_node_to_md(e))
                 .unwrap_or_default();
 
-            // Chapter notes
             let chapter_notes_begin = chapter_doc
                 .select(&sel("div#chapters div.preface div.notes blockquote.userstuff"))
                 .next()
@@ -195,7 +202,6 @@ fn main() {
                 .map(|e| html_node_to_md(e))
                 .unwrap_or_default();
 
-            // Assemble
             let mut md = String::new();
             if !title.is_empty() {
                 md.push_str(&format!("# {}\n\n", title));
@@ -214,15 +220,45 @@ fn main() {
                 ));
             }
 
-            // Write
-            let chapter_path = out_dir.join(&filename);
-            fs::write(&chapter_path, &md).expect("Failed to write chapter file");
+            fs::write(out_dir.join(format!("{}.md", filename)), &md)
+                .expect("Failed to write chapter md");
+
+            // -- HTML with translation slots --
+            let content_el = chapter_doc
+                .select(&sel("div.userstuff[role='article']"))
+                .next()
+                .or_else(|| {
+                    chapter_doc
+                        .select(&sel("div#chapters div.userstuff"))
+                        .next()
+                });
+            let notes_begin_el = chapter_doc
+                .select(&sel("div#chapters div.preface div.notes blockquote.userstuff"))
+                .next();
+            let notes_end_el = chapter_doc
+                .select(&sel("div#chapters div.end.notes blockquote"))
+                .next();
+
+            let display_title = if title.is_empty() {
+                format!("Chapter {}", chapter_num)
+            } else {
+                title.clone()
+            };
+            let study_html = generate_chapter_html(
+                &display_title,
+                content_el,
+                notes_begin_el,
+                notes_end_el,
+                chapter_num,
+            );
+            fs::write(out_dir.join(format!("{}.html", filename)), &study_html)
+                .expect("Failed to write chapter html");
 
             pb.inc(1);
         }
 
         pb.finish_with_message(format!(
-            "{} {} chapters",
+            "{} {} chapters (md + html)",
             style("Done!").green().bold(),
             total
         ));
@@ -842,6 +878,413 @@ fn process_table(table: ElementRef, out: &mut String) {
             out.push('\n');
         }
     }
+}
+
+/// Generate a study HTML page for a chapter with translation slots under each paragraph.
+fn generate_chapter_html(
+    title: &str,
+    content_el: Option<ElementRef>,
+    notes_begin_el: Option<ElementRef>,
+    notes_end_el: Option<ElementRef>,
+    chapter_num: usize,
+) -> String {
+    let mut body = String::new();
+
+    // Chapter notes (beginning)
+    if let Some(el) = notes_begin_el {
+        body.push_str("<div class=\"chapter-notes\">\n<p class=\"notes-label\">Chapter Notes</p>\n");
+        body.push_str(&html_node_inner(el));
+        body.push_str("\n</div>\n<hr>\n");
+    }
+
+    // Main content: walk children, wrap each <p> with a translation block
+    if let Some(el) = content_el {
+        let mut para_id = 0;
+        for child in el.children() {
+            match child.value() {
+                scraper::node::Node::Element(elem) => {
+                    if let Some(child_ref) = ElementRef::wrap(child) {
+                        let tag = elem.name();
+                        let class = elem.attr("class").unwrap_or("");
+                        // Skip landmark headings
+                        if (tag.starts_with('h') && tag.len() == 2)
+                            && (class.contains("landmark") || class.contains("heading"))
+                        {
+                            continue;
+                        }
+                        if tag == "span" && class.contains("landmark") {
+                            continue;
+                        }
+
+                        if tag == "p" {
+                            para_id += 1;
+                            let inner = html_node_inner(child_ref);
+                            body.push_str(&format!(
+                                "<div class=\"para-block\" id=\"p{pid}\">\n\
+                                 <p class=\"original\">{inner}</p>\n\
+                                 <div class=\"translation\">\n\
+                                 <p class=\"trans-text\"></p>\n\
+                                 <details class=\"vocab\"><summary>Vocabulary &amp; Chunks</summary>\n\
+                                 <div class=\"vocab-content\">\n\
+                                 <p class=\"vocab-item\"></p>\n\
+                                 <p class=\"chunks\"></p>\n\
+                                 </div>\n\
+                                 </details>\n\
+                                 </div>\n\
+                                 </div>\n\n",
+                                pid = para_id,
+                                inner = inner
+                            ));
+                        } else {
+                            // Non-paragraph elements (hr, h1-h6, blockquote, etc.)
+                            body.push_str(&outer_html(child_ref));
+                            body.push('\n');
+                        }
+                    }
+                }
+                scraper::node::Node::Text(text) => {
+                    let t = text.text.trim();
+                    if !t.is_empty() {
+                        para_id += 1;
+                        body.push_str(&format!(
+                            "<div class=\"para-block\" id=\"p{pid}\">\n\
+                             <p class=\"original\">{text}</p>\n\
+                             <div class=\"translation\">\n\
+                             <p class=\"trans-text\"></p>\n\
+                             <details class=\"vocab\"><summary>Vocabulary &amp; Chunks</summary>\n\
+                             <div class=\"vocab-content\">\n\
+                             <p class=\"vocab-item\"></p>\n\
+                             <p class=\"chunks\"></p>\n\
+                             </div>\n\
+                             </details>\n\
+                             </div>\n\
+                             </div>\n\n",
+                            pid = para_id,
+                            text = html_escape(t)
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Chapter notes (end)
+    if let Some(el) = notes_end_el {
+        body.push_str("<hr>\n<div class=\"chapter-notes\">\n<p class=\"notes-label\">End Notes</p>\n");
+        body.push_str(&html_node_inner(el));
+        body.push_str("\n</div>\n");
+    }
+
+    // Navigation
+    let prev = if chapter_num > 1 {
+        format!(
+            "<a href=\"chapter{}.html\">&laquo; Previous</a>",
+            chapter_num - 1
+        )
+    } else {
+        String::new()
+    };
+    let next = format!(
+        "<a href=\"chapter{}.html\">Next &raquo;</a>",
+        chapter_num + 1
+    );
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+{CSS}
+</head>
+<body>
+<nav class="chapter-nav">
+  <span>{prev}</span>
+  <a href="metadata.html">Index</a>
+  <span>{next}</span>
+</nav>
+<article>
+<h1>{title}</h1>
+{body}
+</article>
+<nav class="chapter-nav">
+  <span>{prev}</span>
+  <a href="metadata.html">Index</a>
+  <span>{next}</span>
+</nav>
+</body>
+</html>"#,
+        title = html_escape(title),
+        CSS = STUDY_CSS,
+        prev = prev,
+        next = next,
+        body = body
+    )
+}
+
+/// Get the inner HTML of an element (its children serialized).
+fn html_node_inner(el: ElementRef) -> String {
+    el.inner_html()
+}
+
+/// Get the outer HTML of an element.
+fn outer_html(el: ElementRef) -> String {
+    el.html()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn generate_metadata_html(meta: &WorkMeta) -> String {
+    let mut rows = String::new();
+    rows.push_str(&format!("<tr><th>Rating</th><td>{}</td></tr>\n", html_escape(&meta.rating)));
+    rows.push_str(&format!(
+        "<tr><th>Warnings</th><td>{}</td></tr>\n",
+        html_escape(&meta.warnings.join(", "))
+    ));
+    if !meta.categories.is_empty() {
+        rows.push_str(&format!(
+            "<tr><th>Categories</th><td>{}</td></tr>\n",
+            html_escape(&meta.categories.join(", "))
+        ));
+    }
+    rows.push_str(&format!(
+        "<tr><th>Fandoms</th><td>{}</td></tr>\n",
+        html_escape(&meta.fandoms.join(", "))
+    ));
+    if !meta.relationships.is_empty() {
+        rows.push_str(&format!(
+            "<tr><th>Relationships</th><td>{}</td></tr>\n",
+            html_escape(&meta.relationships.join(", "))
+        ));
+    }
+    if !meta.characters.is_empty() {
+        rows.push_str(&format!(
+            "<tr><th>Characters</th><td>{}</td></tr>\n",
+            html_escape(&meta.characters.join(", "))
+        ));
+    }
+    rows.push_str(&format!(
+        "<tr><th>Language</th><td>{}</td></tr>\n",
+        html_escape(&meta.language)
+    ));
+
+    let stat_keys = ["Words", "Chapters", "Comments", "Kudos", "Bookmarks", "Hits"];
+    let mut stat_rows = String::new();
+    for key in &stat_keys {
+        if let Some(val) = meta.stats.get(*key) {
+            stat_rows.push_str(&format!(
+                "<tr><th>{}</th><td>{}</td></tr>\n",
+                key,
+                html_escape(val)
+            ));
+        }
+    }
+
+    let mut tags_html = String::new();
+    for tag in &meta.additional_tags {
+        tags_html.push_str(&format!("<span class=\"tag\">{}</span> ", html_escape(tag)));
+    }
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} - Metadata</title>
+{CSS}
+</head>
+<body>
+<article>
+<h1>{title}</h1>
+<p class="byline">by {authors}</p>
+<hr>
+<h2>Work Information</h2>
+<table class="meta-table">{rows}</table>
+<h2>Stats</h2>
+<table class="meta-table">{stat_rows}</table>
+{tags_section}
+{summary_section}
+</article>
+</body>
+</html>"#,
+        title = html_escape(&meta.title),
+        authors = html_escape(&meta.authors.join(", ")),
+        CSS = STUDY_CSS,
+        rows = rows,
+        stat_rows = stat_rows,
+        tags_section = if meta.additional_tags.is_empty() {
+            String::new()
+        } else {
+            format!("<h2>Tags</h2>\n<div class=\"tags\">{}</div>", tags_html)
+        },
+        summary_section = if meta.summary.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<h2>Summary</h2>\n<div class=\"summary\">{}</div>",
+                &meta.summary
+            )
+        }
+    )
+}
+
+const STUDY_CSS: &str = r#"<style>
+:root {
+  --bg: #fafaf9; --fg: #1c1917; --muted: #78716c;
+  --border: #d6d3d1; --accent: #2563eb; --accent-bg: #eff6ff;
+  --trans-bg: #f0fdf4; --trans-border: #86efac;
+  --vocab-bg: #fefce8; --vocab-border: #fde047;
+  --note-bg: #f5f3ff; --note-border: #c4b5fd;
+  --max-w: 48rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1917; --fg: #e7e5e4; --muted: #a8a29e;
+    --border: #44403c; --accent: #60a5fa; --accent-bg: #172554;
+    --trans-bg: #052e16; --trans-border: #166534;
+    --vocab-bg: #422006; --vocab-border: #a16207;
+    --note-bg: #2e1065; --note-border: #6d28d9;
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Georgia', 'Noto Serif', serif;
+  background: var(--bg); color: var(--fg);
+  line-height: 1.8; max-width: var(--max-w);
+  margin: 0 auto; padding: 1.5rem 1rem;
+}
+article { margin-bottom: 3rem; }
+h1 { font-size: 1.6rem; margin-bottom: 0.5rem; border-bottom: 2px solid var(--accent); padding-bottom: 0.3rem; }
+h2 { font-size: 1.3rem; margin: 1.5rem 0 0.5rem; color: var(--accent); }
+h3, h4, h5, h6 { margin: 1.2rem 0 0.4rem; }
+p { margin: 0.6rem 0; }
+hr { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
+a { color: var(--accent); }
+blockquote { border-left: 3px solid var(--border); padding-left: 1rem; color: var(--muted); margin: 0.8rem 0; }
+strong, b { font-weight: 700; }
+em, i { font-style: italic; }
+
+.byline { color: var(--muted); margin-bottom: 1rem; }
+.meta-table { width: 100%; border-collapse: collapse; margin: 0.5rem 0 1rem; }
+.meta-table th { text-align: left; padding: 0.4rem 0.8rem; background: var(--accent-bg); width: 30%; border: 1px solid var(--border); }
+.meta-table td { padding: 0.4rem 0.8rem; border: 1px solid var(--border); }
+.tags { margin: 0.5rem 0; }
+.tag { display: inline-block; background: var(--accent-bg); color: var(--accent); padding: 0.15rem 0.5rem; border-radius: 0.8rem; font-size: 0.85rem; margin: 0.2rem; }
+
+.chapter-nav { display: flex; justify-content: space-between; padding: 0.8rem 0; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; font-size: 0.9rem; }
+.chapter-nav:last-child { border-bottom: none; border-top: 1px solid var(--border); margin-top: 1.5rem; margin-bottom: 0; }
+
+.para-block {
+  margin: 1.2rem 0; padding: 0.8rem;
+  border-left: 3px solid var(--border);
+  border-radius: 0 0.4rem 0.4rem 0;
+  transition: border-color 0.2s;
+}
+.para-block:hover { border-left-color: var(--accent); }
+.para-block .original { font-size: 1.05rem; line-height: 1.85; margin-bottom: 0.4rem; }
+.translation {
+  background: var(--trans-bg); border: 1px dashed var(--trans-border);
+  border-radius: 0.4rem; padding: 0.6rem 0.8rem; margin-top: 0.5rem;
+  min-height: 2.5rem;
+}
+.trans-text { color: var(--muted); font-size: 0.95rem; }
+.trans-text:empty::before { content: "Translation / \7FFB\8BD1"; color: var(--muted); opacity: 0.4; }
+.vocab {
+  margin-top: 0.5rem; font-size: 0.88rem;
+}
+.vocab summary {
+  cursor: pointer; color: var(--accent); font-weight: 600; font-size: 0.85rem;
+  user-select: none; padding: 0.2rem 0;
+}
+.vocab-content {
+  background: var(--vocab-bg); border: 1px solid var(--vocab-border);
+  border-radius: 0.3rem; padding: 0.5rem 0.7rem; margin-top: 0.3rem;
+}
+.vocab-item:empty::before { content: "Word (pos) /phonetic/ — definition  e.g. ..."; color: var(--muted); opacity: 0.4; }
+.chunks:empty::before { content: "Chunks: phrase1, phrase2, ..."; color: var(--muted); opacity: 0.4; }
+
+.chapter-notes {
+  background: var(--note-bg); border: 1px solid var(--note-border);
+  border-radius: 0.5rem; padding: 0.8rem 1rem; margin: 1rem 0;
+}
+.notes-label { font-weight: 700; color: var(--accent); margin-bottom: 0.4rem; }
+
+.summary { margin: 0.5rem 0; padding: 0.8rem; background: var(--accent-bg); border-radius: 0.4rem; }
+</style>"#;
+
+fn generate_prompt(work_title: &str) -> String {
+    format!(
+        r#"# Translation & Vocabulary Prompt for: {title}
+
+You are a professional English-to-Chinese literary translator and language tutor. You will receive a chapter of the English fanfiction "{title}" from AO3. Your task is to process each paragraph and produce structured output.
+
+## Input Format
+The chapter text is divided into numbered paragraphs (marked with IDs like p1, p2, ...). Process each paragraph individually.
+
+## Output Format
+For each paragraph, output the following structure (keep the paragraph ID):
+
+---
+
+### p[N]
+
+**Translation:**
+[Fluent, natural Chinese translation that preserves the tone, style, and literary quality of the original. Use 「」 for dialogue. Do not translate proper nouns — keep character names, place names, and faction names in English.]
+
+**Vocabulary (>IETLS 6.5):**
+- **word** (part_of_speech) /phonetic/ — Chinese definition
+  - Example: [a short example sentence from the text or a common usage]
+- **word2** (part_of_speech) /phonetic/ — Chinese definition
+  - Example: ...
+[List 3-8 important or difficult words per paragraph. Skip common words (the, is, a, etc.). Prioritize: domain-specific terms, literary vocabulary, phrasal verbs, idioms.]
+
+**Chunks (>IETLS 6.5):**
+- **phrase/collocation** — meaning in Chinese; usage note if needed
+- **phrase2** — meaning
+[List 2-5 useful multi-word expressions, collocations, or idiomatic phrases from the paragraph.]
+
+---
+
+## Guidelines
+1. Translation should read naturally in Chinese — it is literary translation, not word-for-word
+2. Keep the author's tone: if humorous, stay humorous; if tense, stay tense
+3. For vocabulary, focus on words a B2-C1 English learner might not know
+4. Phonetic notation uses IPA (International Phonetic Alphabet)
+5. Chunks should be phrases that are reusable in other contexts
+6. If a paragraph is very short (< 10 words) or is just a scene break / date header, you may write "N/A" for vocabulary and chunks
+7. Process ALL paragraphs — do not skip any
+
+## Example Output
+
+### p1
+
+**Translation:**
+阳光透过古老的彩色玻璃窗倾泻而入，在石板地面上投下万花筒般的图案，将整个大厅染上了一层温暖而空灵的光辉。
+
+**Vocabulary:**
+- **kaleidoscope** (n) /kəˈlaɪdəskoʊp/ — 万花筒；千变万化的景象
+  - Example: The garden was a kaleidoscope of colors in spring.
+- **ethereal** (adj) /ɪˈθɪriəl/ — 空灵的，超凡脱俗的
+  - Example: The music had an ethereal quality that captivated everyone.
+
+**Chunks:**
+- **cast patterns on** — 在……上投下图案
+- **bathe in light** — 沐浴在光辉中
+
+---
+
+Now process the chapter text that follows. Output ALL paragraphs.
+"#,
+        title = work_title
+    )
 }
 
 fn prefix_lines(text: &str, prefix: &str) -> String {
